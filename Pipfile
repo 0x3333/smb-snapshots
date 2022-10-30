@@ -6,8 +6,8 @@ name = "pypi"
 [packages]
 
 [dev-packages]
+pylama = "*"
 "autopep8" = "*"
-pylint = "*"
 mypy = "*"
 
 [requires]

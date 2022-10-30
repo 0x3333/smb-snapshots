@@ -129,17 +129,20 @@ class SmbSnapshots:
             dest = os.path.normpath("{}/{}".format(snap, self._snap_folder))
 
             if not os.path.exists(shares_root):
-                logging.error("Shares root '%s' not found! Exiting...", snaps_root)
+                logging.error(
+                    "Shares root '%s' not found! Exiting...", snaps_root)
                 return False
             if not os.path.exists(snaps_root):
-                logging.error("Snapshot root '%s' not found! Exiting...", snaps_root)
+                logging.error(
+                    "Snapshot root '%s' not found! Exiting...", snaps_root)
                 return False
 
             if not os.path.exists(share):
                 logging.error("Share %s not found! Ignoring...", share)
             else:
                 if os.stat(share).st_dev != os.stat(snaps_root).st_dev:
-                    logging.error("Share '%s' and Snapshot root '%s' is not on the same filesystem! Not supported!", share, snaps_root)
+                    logging.error(
+                        "Share '%s' and Snapshot root '%s' is not on the same filesystem! Not supported!", share, snaps_root)
 
                 snaps: List[str] = []
                 first_snapshot = not os.path.exists(snap)
@@ -151,21 +154,26 @@ class SmbSnapshots:
                         logging.info("Creating folder {}".format(snap))
                 else:
                     # List all snapshots we have
-                    snaps = [f for f in os.listdir(snap) if re.match(_REGEX_SNAP_FOLDER, f)]
+                    snaps = [f for f in os.listdir(
+                        snap) if re.match(_REGEX_SNAP_FOLDER, f)]
                     snaps.sort()
 
                 source = share  # The default source is the share itself
-                command = [_COPY_COMMAND, *_COPY_ARGS, "{}/.".format(source), dest]
+                command = [_COPY_COMMAND, *_COPY_ARGS,
+                           "{}/.".format(source), dest]
 
                 # Run copy command
                 if not self._run_command(command):
-                    logging.error("Copy failed, will not remove old snapshots!")
+                    logging.error(
+                        "Copy failed, will not remove old snapshots!")
                 else:
                     # Remove old snapshots
-                    logging.debug("Snapshots Count: %s, max: %s", len(snaps), self._snaps_count)
+                    logging.debug("Snapshots Count: %s, max: %s",
+                                  len(snaps), self._snaps_count)
                     snaps = snaps[:len(snaps) - self._snaps_count]
                     for snap_to_remove in snaps:
-                        path = os.path.normpath("{}/{}".format(snap, snap_to_remove))
+                        path = os.path.normpath(
+                            "{}/{}".format(snap, snap_to_remove))
                         logging.info("Removing old snapshot '%s'.", path)
                         if not self._dry_run:
                             shutil.rmtree(path)
@@ -191,10 +199,12 @@ class SmbSnapshots:
         elif isinstance(cmd, list):
             logging.info("Command: %s", " ".join(cmd))
             if not self._dry_run:
-                res_l = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                res_l = subprocess.run(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 if res_l.returncode != 0:
                     self._cmd_failed = True
-                    logging.error("Last command failed!\n%s", res_l.stdout.decode("utf-8"))
+                    logging.error("Last command failed!\n%s",
+                                  res_l.stdout.decode("utf-8"))
                     return False
             return True
         raise ValueError("Invalid command type!")
@@ -203,18 +213,23 @@ class SmbSnapshots:
 def main():
     # Parse arguments
     formatter = argparse.ArgumentDefaultsHelpFormatter
-    parser = argparse.ArgumentParser(description="Create/Manage SMB snapshots", formatter_class=formatter)
-    parser.add_argument("-c", "--cfg-file", help="Configuration file", default=_CFG_FILE)
+    parser = argparse.ArgumentParser(
+        description="Create/Manage SMB snapshots", formatter_class=formatter)
+    parser.add_argument("-c", "--cfg-file",
+                        help="Configuration file", default=_CFG_FILE)
     parser.add_argument("-l", "--log-file", help="Log file", default=_LOG_FILE)
     parser.add_argument("--pid-file", help="PID file", default=_PID_FILE)
-    parser.add_argument("--dry-run", help="Do not make changes", action="store_true")
+    parser.add_argument(
+        "--dry-run", help="Do not make changes", action="store_true")
     parser.add_argument("-v", "--verbose", help="Verbose", action="store_true")
-    parser.add_argument("--version", action="version", version="smb-snapshots v%s" % _VERSION)
+    parser.add_argument("--version", action="version",
+                        version="smb-snapshots v%s" % _VERSION)
     args = parser.parse_args()
 
     # Parse Configuration File
     if not os.path.exists(args.cfg_file):
-        print("Configuration file not found! Default location: {}.".format(_CFG_FILE), file=sys.stderr)
+        print("Configuration file not found! Default location: {}.".format(
+            _CFG_FILE), file=sys.stderr)
         print(_EXAMPLE_CFG, file=sys.stderr)
         sys.exit(_EXIT_NO_CONFIG)
 
@@ -227,7 +242,8 @@ def main():
         pre_exec = config["Cmd"].get("PRE_EXEC", "")
         post_exec = config["Cmd"].get("POST_EXEC", "")
         # Directories
-        shares = [entry.strip() for entry in config["Directories"]["SHARES"].split(",")]
+        shares = [entry.strip()
+                  for entry in config["Directories"]["SHARES"].split(",")]
         shares_root = config["Directories"]["SHARES_ROOT"]
         snaps_root = config["Directories"]["SNAPS_ROOT"]
     except KeyError as error:
@@ -271,6 +287,7 @@ def main():
     except AlreadyRunningInstanceError as err:
         logging.error("backup-rclone already running!")
         sys.exit(_EXIT_ALREADY_RUNNING)
+
 
 if __name__ == "__main__":
     main()
