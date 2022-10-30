@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+
+# Ignore long lines
+# pylama:ignore=E501
+
+import argparse
+import configparser
+import datetime as date
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+from subprocess import CompletedProcess
+from typing import List, Tuple, Union
+
+
+#
+# Constants
+#
+
+# Version
+_VERSION = "1.0.1"
+
+# Default Files
+_CFG_FILE = "/etc/smb-snapshot.conf"
+_LOG_FILE = "/var/log/smb-snapshot.log"
+_PID_FILE = "/var/run/smb-snapshot.pid"
+
+# Exit codes
+_EXIT_OK = 0
+_EXIT_NO_CONFIG = 1
+_EXIT_INVALID_CONFIG = 2
+_EXIT_INVALID_FOLDERS = 3
+_EXIT_ALREADY_RUNNING = 4
+_EXIT_FINISHED_WITH_ERRORS = 255
+
+# Snapshots
+_STRFTIME_FORMAT = "@GMT-%Y.%m.%d-%H.%M.%S"
+_REGEX_SNAP_FOLDER = r"@GMT-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{2}\.[0-9]{2}\.[0-9]{2}"
+
+# Commands
+_COPY_COMMAND = "cp"
+_COPY_ARGS = ["--archive", "--one-file-system", "--reflink=always"]
+
+# Config
+_EXAMPLE_CFG = """[Config]
+    # How many snapshots to keep(Default: 210)
+    SNAPS_COUNT = 100
+
+[Cmd]
+    # Command that will be executed before snapshots
+    PRE_EXEC = /bin/mount -o remount,rw /srv/snapshots
+    # Command that will be executed after snapshots(Even after a failure)
+    POST_EXEC = /bin/mount -o remount,ro /srv/snapshots
+
+[Directories]
+    # Shares to create snapshots(Relative to SHARES_ROOT, comma separated)
+    SHARES = My Share 1,My Share 2,ShareN
+    # Root folder to shares
+    SHARES_ROOT = /srv/shares
+    # Snapshots root folder
+    SNAPS_ROOT = /srv/snapshots
+"""
+
+
+#
+# Locking
+#
+
+
+class AlreadyRunningInstanceError(Exception):
+    pass
+
+
+class SingleInstanceContext:
+    """Context manager for tasks"""
+
+    def __init__(self, pid_file):
+        self.pid_file = pid_file
+
+        if os.path.exists(pid_file):
+            raise AlreadyRunningInstanceError("Instance already running")
+
+    def __enter__(self):
+        self.fl = open(self.pid_file, "w")
+        self.fl.write(str(os.getpid()))
+        self.fl.flush()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.fl.close()
+        os.unlink(self.pid_file)
+
+
+class SmbSnapshots:
+
+    def __init__(self, dry_run, snaps_count, pre_exec, post_exec, shares, shares_root, snaps_root) -> None:
+        logging.info("Starting smb-snapshots")
+
+        self._cmd_failed = False
+
+        self._snap_folder = date.datetime.utcnow().strftime(_STRFTIME_FORMAT)
+
+        self._dry_run = dry_run
+        self._snaps_count = snaps_count
+        self._pre_exec = pre_exec
+        self._post_exec = post_exec
+        self._shares = shares
+        self._shares_root = shares_root
+        self._snaps_root = snaps_root
+
+    def do_snapshot(self) -> bool:
+        if self._pre_exec:
+            if not self._run_command(self._pre_exec):
+                logging.error("Could not run PRE_EXEC command!")
+                return False
+
+        for share_name in self._shares:
+            shares_root = os.path.normpath(self._shares_root)
+            snaps_root = os.path.normpath(self._snaps_root)
+
+            share = os.path.normpath(
+                "{}/{}".format(self._shares_root, share_name))
+            snap = os.path.normpath(
+                "{}/{}".format(self._snaps_root, share_name))
+
+            dest = os.path.normpath("{}/{}".format(snap, self._snap_folder))
+
+            if not os.path.exists(shares_root):
+                logging.error("Shares root '%s' not found! Exiting...", snaps_root)
+                return False
+            if not os.path.exists(snaps_root):
+                logging.error("Snapshot root '%s' not found! Exiting...", snaps_root)
+                return False
+
+            if not os.path.exists(share):
+                logging.error("Share %s not found! Ignoring...", share)
+            else:
+                if os.stat(share).st_dev != os.stat(snaps_root).st_dev:
+                    logging.error("Share '%s' and Snapshot root '%s' is not on the same filesystem! Not supported!", share, snaps_root)
+
+                snaps: List[str] = []
+                first_snapshot = not os.path.exists(snap)
+                if first_snapshot:
+                    # We don't have a snapshot root dir for this share, create it
+                    if not self._dry_run:
+                        os.mkdir(snap)
+                    else:
+                        logging.info("Creating folder {}".format(snap))
+                else:
+                    # List all snapshots we have
+                    snaps = [f for f in os.listdir(snap) if re.match(_REGEX_SNAP_FOLDER, f)]
+                    snaps.sort()
+
+                source = share  # The default source is the share itself
+                command = [_COPY_COMMAND, *_COPY_ARGS, "{}/.".format(source), dest]
+
+                # Run copy command
+                if not self._run_command(command):
+                    logging.error("Copy failed, will not remove old snapshots!")
+                else:
+                    # Remove old snapshots
+                    logging.debug("Snapshots Count: %s, max: %s", len(snaps), self._snaps_count)
+                    snaps = snaps[:len(snaps) - self._snaps_count]
+                    for snap_to_remove in snaps:
+                        path = os.path.normpath("{}/{}".format(snap, snap_to_remove))
+                        logging.info("Removing old snapshot '%s'.", path)
+                        if not self._dry_run:
+                            shutil.rmtree(path)
+
+        if self._post_exec:
+            self._run_command(self._post_exec)
+
+        if self._cmd_failed:
+            return False
+
+        return True
+
+    def _run_command(self, cmd) -> bool:
+        if isinstance(cmd, str):
+            logging.info("Command: %s", cmd)
+            if not self._dry_run:
+                res_s = subprocess.getstatusoutput(cmd)
+                if res_s[0] != 0:
+                    self._cmd_failed = True
+                    logging.error("Last command failed!\n%s", res_s[1])
+                    return False
+            return True
+        elif isinstance(cmd, list):
+            logging.info("Command: %s", " ".join(cmd))
+            if not self._dry_run:
+                res_l = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                if res_l.returncode != 0:
+                    self._cmd_failed = True
+                    logging.error("Last command failed!\n%s", res_l.stdout.decode("utf-8"))
+                    return False
+            return True
+        raise ValueError("Invalid command type!")
+
+
+def main():
+    # Parse arguments
+    formatter = argparse.ArgumentDefaultsHelpFormatter
+    parser = argparse.ArgumentParser(description="Create/Manage SMB snapshots", formatter_class=formatter)
+    parser.add_argument("-c", "--cfg-file", help="Configuration file", default=_CFG_FILE)
+    parser.add_argument("-l", "--log-file", help="Log file", default=_LOG_FILE)
+    parser.add_argument("--pid-file", help="PID file", default=_PID_FILE)
+    parser.add_argument("--dry-run", help="Do not make changes", action="store_true")
+    parser.add_argument("-v", "--verbose", help="Verbose", action="store_true")
+    parser.add_argument("--version", action="version", version="smb-snapshots v%s" % _VERSION)
+    args = parser.parse_args()
+
+    # Parse Configuration File
+    if not os.path.exists(args.cfg_file):
+        print("Configuration file not found! Default location: {}.".format(_CFG_FILE), file=sys.stderr)
+        print(_EXAMPLE_CFG, file=sys.stderr)
+        sys.exit(_EXIT_NO_CONFIG)
+
+    config = configparser.ConfigParser()
+    config.read(args.cfg_file)
+    try:
+        # Config
+        snaps_count = int(config["Config"]["SNAPS_COUNT"])
+        # Pre/Post commands
+        pre_exec = config["Cmd"].get("PRE_EXEC", "")
+        post_exec = config["Cmd"].get("POST_EXEC", "")
+        # Directories
+        shares = [entry.strip() for entry in config["Directories"]["SHARES"].split(",")]
+        shares_root = config["Directories"]["SHARES_ROOT"]
+        snaps_root = config["Directories"]["SNAPS_ROOT"]
+    except KeyError as error:
+        print("Key {} missing in configuration file!".format(
+            error), file=sys.stderr)
+        sys.exit(_EXIT_INVALID_CONFIG)
+
+    if not os.path.exists(shares_root):
+        print("SHARES_ROOT '{}' not found!".format(
+            shares_root), file=sys.stderr)
+        sys.exit(_EXIT_INVALID_FOLDERS)
+
+    # Setup Logging
+    class InfoFilter(logging.Filter):
+
+        def filter(self, rec) -> bool:
+            return rec.levelno in (logging.DEBUG, logging.INFO)
+
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        handlers=[logging.FileHandler(args.log_file)])
+    logger = logging.getLogger()
+    handlerOut = logging.StreamHandler(sys.stdout)
+    handlerOut.setLevel(logger.level)
+    handlerOut.addFilter(InfoFilter())
+    handlerErr = logging.StreamHandler()
+    handlerErr.setLevel(logging.WARNING)
+    logger.addHandler(handlerOut)
+    logger.addHandler(handlerErr)
+
+    # Starting
+    try:
+        with SingleInstanceContext(args.pid_file):
+            if SmbSnapshots(args.dry_run, snaps_count, pre_exec, post_exec, shares, shares_root, snaps_root).do_snapshot():
+                logging.info("smb-snapshots finished!")
+                sys.exit(_EXIT_OK)
+
+            print("smb-snapshots finished with errors!", file=sys.stderr)
+            sys.exit(_EXIT_FINISHED_WITH_ERRORS)
+    except AlreadyRunningInstanceError as err:
+        logging.error("backup-rclone already running!")
+        sys.exit(_EXIT_ALREADY_RUNNING)
+
+if __name__ == "__main__":
+    main()
