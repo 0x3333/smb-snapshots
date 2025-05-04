@@ -12,8 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
-from subprocess import CompletedProcess
-from typing import List, Tuple, Union
+from typing import List
 
 
 #
@@ -21,7 +20,7 @@ from typing import List, Tuple, Union
 #
 
 # Version
-_VERSION = "1.0.1"
+_VERSION = "1.0.2"
 
 # Default Files
 _CFG_FILE = "/etc/smb-snapshot.conf"
@@ -170,7 +169,7 @@ class SmbSnapshots:
                     # Remove old snapshots
                     logging.debug("Snapshots Count: %s, max: %s",
                                   len(snaps), self._snaps_count)
-                    snaps = snaps[:len(snaps) - self._snaps_count]
+                    snaps = snaps[:self._snaps_count]
                     for snap_to_remove in snaps:
                         path = os.path.normpath(
                             "{}/{}".format(snap, snap_to_remove))
@@ -284,8 +283,8 @@ def main():
 
             print("smb-snapshots finished with errors!", file=sys.stderr)
             sys.exit(_EXIT_FINISHED_WITH_ERRORS)
-    except AlreadyRunningInstanceError as err:
-        logging.error("backup-rclone already running!")
+    except AlreadyRunningInstanceError:
+        logging.error("smb-snapshots already running!")
         sys.exit(_EXIT_ALREADY_RUNNING)
 
 
