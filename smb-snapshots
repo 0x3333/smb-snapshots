@@ -167,10 +167,10 @@ class SmbSnapshots:
                         "Copy failed, will not remove old snapshots!")
                 else:
                     # Remove old snapshots
-                    logging.debug("Snapshots Count: %s, max: %s",
-                                  len(snaps), self._snaps_count)
-                    snaps = snaps[:self._snaps_count]
-                    for snap_to_remove in snaps:
+                    snaps_to_remove = snaps[:-self._snaps_count]
+                    logging.debug("Snapshots Count: %s, max: %s, to remove: %s",
+                                  len(snaps), self._snaps_count, len(snaps_to_remove))
+                    for snap_to_remove in snaps_to_remove:
                         path = os.path.normpath(
                             "{}/{}".format(snap, snap_to_remove))
                         logging.info("Removing old snapshot '%s'.", path)
